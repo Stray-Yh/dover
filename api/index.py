@@ -8,11 +8,11 @@ import time
 from flask import Flask, jsonify, request, Response
 from datetime import datetime, timedelta, timezone
 
-WEBHOOK_FAILED_ATTESTATION = ""
-WEBHOOK_SUCCESS_ATTESTATION = ""
-WEBHOOK_FAILED_ORGSCOPE = ""
-WEBHOOK_SUCCESS_ORGSCOPE = ""
-WEBHOOK_ATTEST_NONCE_LOGS = ""
+WEBHOOK_FAILED_ATTESTATION = "https://discord.com/api/webhooks/1572717554089066689/aqdCZ2lPTR83zcTIGKVfZzWzczzSU5eHmuzLCY3kY_hzEyBtNaJ4tTphv9716RD4kpTQ"
+WEBHOOK_SUCCESS_ATTESTATION = "https://discord.com/api/webhooks/1572717554089066689/aqdCZ2lPTR83zcTIGKVfZzWzczzSU5eHmuzLCY3kY_hzEyBtNaJ4tTphv9716RD4kpTQ"
+WEBHOOK_FAILED_ORGSCOPE = "https://discord.com/api/webhooks/1572717554089066689/aqdCZ2lPTR83zcTIGKVfZzWzczzSU5eHmuzLCY3kY_hzEyBtNaJ4tTphv9716RD4kpTQ"
+WEBHOOK_SUCCESS_ORGSCOPE = "https://discord.com/api/webhooks/1572717554089066689/aqdCZ2lPTR83zcTIGKVfZzWzczzSU5eHmuzLCY3kY_hzEyBtNaJ4tTphv9716RD4kpTQ"
+WEBHOOK_ATTEST_NONCE_LOGS = "https://discord.com/api/webhooks/1572717554089066689/aqdCZ2lPTR83zcTIGKVfZzWzczzSU5eHmuzLCY3kY_hzEyBtNaJ4tTphv9716RD4kpTQ"
 
 class GameInfo:
     def __init__(self) -> None:
