@@ -17,7 +17,7 @@ class GameInfo:
     def __init__(self):
         # Replace with your actual values (from environment variables recommended)
         self.TitleId: str = "178286"
-        self.SecretKey: str = "sekey"
+        self.SecretKey: str = "MT5IG5XABWMS3P81BOKDWPO3KFKYMHEATFB1UHUXZ4ESD1KCBD"
         self.ApiKey: str = "testiclesaremyfavouritefrfrfrfrfrfrfrfrfrfrfrfrfrfrfrfrfrfrfrfrfrfrfr"
         self.PlayfabAuthenticationWebhook: str = "https://discord.com/api/webhooks/1572717554089066689/aqdCZ2lPTR83zcTIGKVfZzWzczzSU5eHmuzLCY3kY_hzEyBtNaJ4tTphv9716RD4kpTQ"
         self.QuestsWebhook: str = "https://discord.com/api/webhooks/1572717554089066689/aqdCZ2lPTR83zcTIGKVfZzWzczzSU5eHmuzLCY3kY_hzEyBtNaJ4tTphv9716RD4kpTQ"
