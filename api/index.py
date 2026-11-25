@@ -18,7 +18,7 @@ class GameInfo:
     def __init__(self) -> None:
         self.TitleId:   str = "178286"
         self.SecretKey: str = "MT5IG5XABWMS3P81BOKDWPO3KFKYMHEATFB1UHUXZ4ESD1KCBD"
-        self.AppCreds:  str = ""
+        self.AppCreds:  str = "OC|1385138534689986|c1d6ef3b12409bdeaafafb47013ca8fd"
         self.OculusAppId: str = "1385138534689986"
         self.EntitlementCheck: bool = True
 
