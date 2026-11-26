@@ -87,7 +87,7 @@ def custom_id_login_enabled():
 
 @app.route("/")
 def hello():
-    return "Hello, World!"
+    return "CloverTag's goody 2 shoes backend opeennn"
 
 
 @app.route("/auth/login", methods=["POST"])
