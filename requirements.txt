@@ -1,7 +1,2 @@
 Flask
 requests
-python-jose
-pymongo
-cryptography
-werkzeug
-certifi
