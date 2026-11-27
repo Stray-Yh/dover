@@ -106,7 +106,7 @@ def verify_discord_request(headers, body):
             bytes.fromhex(signature),
         )
         return True
-    except (ValueError, BadSignatureError, RuntimeError):
+    except (Value, BadSignatureError, RuntimeError):
         return False
 
 
@@ -301,8 +301,12 @@ class handler(BaseHTTPRequestHandler):
                     "command": result,
                 })
 
-            except Exception as exc:
-                self._send(500, {"error": str(exc)})
+except Exception as exc:
+    import traceback
+    self._send(500, {
+        "error": str(exc),
+        "details": traceback.format_exc()
+    })
 
             return
 
