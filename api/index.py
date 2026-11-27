@@ -231,6 +231,7 @@ def send_claim_dm(discord_user_id):
 
 
 # PROCESS PLAYER ID MODAL
+
 def process_modal(interaction, player_id):
     custom_id = interaction.get("data", {}).get("custom_id", "")
 
@@ -264,19 +265,16 @@ def process_modal(interaction, player_id):
             )
             return
 
-        # Grant the PlayFab reward
         grant_playfab_item(player_id)
 
-        # Send the confirmation DM
         try:
             send_claim_dm(interaction["member"]["user"]["id"])
-
             message = (
                 "Reward granted! I've sent you a DM. "
                 "Please restart your game."
             )
-
-        except Exception:
+        except Exception as dm_error:
+            print("DM ERROR:", repr(dm_error))
             message = (
                 "Your reward was granted, but I couldn't DM you. "
                 "Enable DMs from server members."
@@ -288,17 +286,19 @@ def process_modal(interaction, player_id):
             message,
         )
 
-    except Exception:
+    except Exception as exc:
+        print("CLAIM ERROR:", repr(exc))
         print(traceback.format_exc())
 
         try:
             edit_original_response(
                 interaction["application_id"],
                 interaction["token"],
-                "I couldn't grant the reward. Please contact a moderator.",
+                f"Claim failed: {str(exc)[:300]}",
             )
-        except Exception:
-            pass
+        except Exception as edit_error:
+            print("DISCORD RESPONSE ERROR:", repr(edit_error))
+
 
 
 class handler(BaseHTTPRequestHandler):
