@@ -36,7 +36,7 @@ def json_bytes(value):
     return json.dumps(value).encode("utf-8")
 
 
-def api_request(method, url, payload=None, headers=None, timeout=10):
+def api_request(method, url, payload=None, headers=None, timeout=15):
     data = None if payload is None else json_bytes(payload)
 
     request_headers = {
@@ -70,6 +70,77 @@ def api_request(method, url, payload=None, headers=None, timeout=10):
         )
 
 
+# UPSTASH REDIS
+# SET NX ensures two simultaneous claims cannot both start.
+
+def redis_command(*args):
+    url = env("UPSTASH_REDIS_REST_URL").rstrip("/")
+    token = env("UPSTASH_REDIS_REST_TOKEN")
+
+    req = urllib.request.Request(
+        url,
+        data=json_bytes(list(args)),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            result = json.loads(
+                response.read().decode("utf-8")
+            )
+
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(
+            "utf-8",
+            errors="replace"
+        )
+        raise RuntimeError(
+            f"Redis HTTP {exc.code}: {detail[:500]}"
+        )
+
+    if "error" in result:
+        raise RuntimeError(
+            f"Redis error: {result['error']}"
+        )
+
+    return result.get("result")
+
+
+def claim_key(playfab_id):
+    return "stump_tag_claim:" + playfab_id
+
+
+def reserve_claim(playfab_id):
+    # Only one request can reserve this Player ID.
+    result = redis_command(
+        "SET",
+        claim_key(playfab_id),
+        "processing",
+        "NX",
+    )
+
+    return result == "OK"
+
+
+def finish_claim(playfab_id):
+    redis_command(
+        "SET",
+        claim_key(playfab_id),
+        "claimed",
+    )
+
+
+def get_claim_status(playfab_id):
+    return redis_command(
+        "GET",
+        claim_key(playfab_id),
+    )
+
+
 # DISCORD API
 
 def discord_api(method, path, payload=None):
@@ -86,7 +157,7 @@ def discord_api(method, path, payload=None):
     )
 
 
-# REGISTER /claimdiscord
+# REGISTER COMMAND
 
 def register_discord_command():
     command = {
@@ -127,7 +198,7 @@ def verify_discord_request(headers, body):
         return False
 
 
-# EDIT THE ORIGINAL PRIVATE RESPONSE
+# EDIT ORIGINAL RESPONSE
 
 def edit_original_response(application_id, token, content):
     url = (
@@ -257,9 +328,12 @@ def send_claim_dm(discord_user_id):
     )
 
 
-# PROCESS MODAL SUBMISSION
+# PROCESS CLAIM
 
 def process_modal(interaction, player_id):
+    application_id = interaction["application_id"]
+    token = interaction["token"]
+
     try:
         data = interaction.get("data", {})
         custom_id = data.get("custom_id", "")
@@ -271,8 +345,8 @@ def process_modal(interaction, player_id):
 
         if original_channel != CLAIM_CHANNEL_ID:
             edit_original_response(
-                interaction["application_id"],
-                interaction["token"],
+                application_id,
+                token,
                 "This claim can only be completed in the designated claim channel.",
             )
             return
@@ -282,9 +356,31 @@ def process_modal(interaction, player_id):
             player_id,
         ):
             edit_original_response(
-                interaction["application_id"],
-                interaction["token"],
-                "That Player ID doesn't look valid. Run `/claimdiscord` and try again.",
+                application_id,
+                token,
+                "That Player ID doesn't look valid. Try again.",
+            )
+            return
+
+        # CHECK AND RESERVE PLAYER CLAIM
+        if not reserve_claim(player_id):
+            status = get_claim_status(player_id)
+
+            if status == "claimed":
+                message = (
+                    "You've already claimed your Discord reward! "
+                    "Each Player ID can only claim once."
+                )
+            else:
+                message = (
+                    "A claim for this Player ID is already processing "
+                    "or needs moderator review."
+                )
+
+            edit_original_response(
+                application_id,
+                token,
+                message,
             )
             return
 
@@ -295,7 +391,12 @@ def process_modal(interaction, player_id):
 
         print("PLAYFAB REWARD GRANTED:", player_id)
 
-        # GET DISCORD USER ID
+        # SAVE SUCCESSFUL CLAIM
+        finish_claim(player_id)
+
+        print("CLAIM SAVED:", player_id)
+
+        # FIND DISCORD USER
         user = interaction.get("member", {}).get("user", {})
         user_id = user.get("id")
 
@@ -325,8 +426,8 @@ def process_modal(interaction, player_id):
             )
 
         edit_original_response(
-            interaction["application_id"],
-            interaction["token"],
+            application_id,
+            token,
             message,
         )
 
@@ -336,11 +437,16 @@ def process_modal(interaction, player_id):
         print("CLAIM ERROR:", repr(exc))
         print(traceback.format_exc())
 
+        # IMPORTANT:
+        # Keep the reservation if an error occurs.
+        # This prevents an uncertain PlayFab result
+        # from accidentally being granted twice.
+
         try:
             edit_original_response(
-                interaction["application_id"],
-                interaction["token"],
-                f"Claim failed: {str(exc)[:300]}",
+                application_id,
+                token,
+                f"Claim failed: {str(exc)[:250]}. Contact a moderator.",
             )
 
         except Exception as edit_error:
@@ -386,7 +492,7 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
 
-        # REGISTER COMMAND THROUGH VERCEL
+        # REGISTER COMMAND
         if "register=1" in self.path:
             try:
                 supplied = self.headers.get(
@@ -433,7 +539,6 @@ class handler(BaseHTTPRequestHandler):
 
         body = self.rfile.read(length)
 
-        # VERIFY REQUEST SIGNATURE
         if not verify_discord_request(
             self.headers,
             body,
@@ -485,7 +590,6 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
 
-            # OPEN PRIVATE MODAL
             self._send(
                 200,
                 {
@@ -530,9 +634,7 @@ class handler(BaseHTTPRequestHandler):
                 "player_id",
             )
 
-            # IMPORTANT:
-            # ACKNOWLEDGE DISCORD IMMEDIATELY.
-            # DO NOT MAKE A SEPARATE CALLBACK REQUEST.
+            # ACKNOWLEDGE DISCORD FIRST
             self._send(
                 200,
                 {
@@ -543,7 +645,7 @@ class handler(BaseHTTPRequestHandler):
                 },
             )
 
-            # PROCESS AFTER ACKNOWLEDGEMENT
+            # PROCESS CLAIM
             process_modal(
                 interaction,
                 (player_id or "").strip(),
@@ -551,7 +653,6 @@ class handler(BaseHTTPRequestHandler):
 
             return
 
-        # UNKNOWN INTERACTION
         self._send(
             200,
             private_message_response(
