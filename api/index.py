@@ -32,7 +32,7 @@ def json_bytes(value):
 
 
 def discord_api(method, path, payload=None):
-    token = env("DISCORD_BOT_TOKEN")
+    token = env("MTU3NTY5ODMwMzU2MjI5MzI1OA.GkfaBc._agrQs2I6TFWBfM8VtZHafJOieyWongfM5nV8w")
 
     url = "https://discord.com/api/v10" + path
     data = None if payload is None else json_bytes(payload)
