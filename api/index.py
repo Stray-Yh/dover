@@ -1,163 +1,231 @@
+import json
 import os
 import re
-import time
-import random
-import string
-from collections import defaultdict
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler
 
-import requests
-from flask import Flask, request, jsonify
-
-app = Flask(__name__)
-
-# ---- Environment variables (set these on your host, never in the code) ----
-META_APP_ID = os.environ.get("1385138534689986", "")
-META_APP_SECRET = os.environ.get("c1d6ef3b12409bdeaafafb47013ca8fd", "")
-PLAYFAB_TITLE_ID = os.environ.get("178286", "")
-PLAYFAB_SECRET_KEY = os.environ.get("MT5IG5XABWMS3P81BOKDWPO3KFKYMHEATFB1UHUXZ4ESD1KCBD", "")
-PHOTON_REALTIME_ID = os.environ.get("3714e542-39ab-413f-9a43-4caa35b5aaa9", "")
-PHOTON_VOICE_ID = os.environ.get("8f09c9df-0434-4b76-b4a7-f946e88186bd", "")
-CRON_SECRET = os.environ.get("CRON_SECRET", "")  # protects /admin/check-custom-id
-
-PF_BASE = f"https://178286.playfabapi.com"
-USER_ID_RE = re.compile(r"^\d{1,20}$")
-
-# Small in-memory rate limit. On serverless hosts this resets between instances,
-# so use your host's rate limiting or Redis for anything serious.
-_hits = defaultdict(list)
+from nacl.exceptions import BadSignatureError
+from nacl.signing import VerifyKey
 
 
-def rate_limited(ip):
-    now = time.time()
-    _hits[ip] = [t for t in _hits[ip] if now - t < 60]
-    _hits[ip].append(now)
-    return len(_hits[ip]) > 10
+def env(name, default=None):
+    value = os.environ.get(name, default)
+    if value is None or value == "":
+        raise RuntimeError(f"Missing environment variable: {name}")
+    return value
 
 
-def verify_meta_nonce(user_id, nonce):
-    """Ask Meta whether this nonce really belongs to this user for our app.
-    Nonces are single-use and short-lived. Returns True/False."""
-    r = requests.post(
-        "https://graph.oculus.com/user_nonce_validate",
-        params={
-            "access_token": f"OC|{META_APP_ID}|{META_APP_SECRET}",
-            "nonce": nonce,
-            "user_id": user_id,
-        },
-        timeout=10,
+def json_bytes(value):
+    return json.dumps(value).encode("utf-8")
+
+
+def discord_api(method, path, payload=None):
+    token = env("MTU3NTY5ODMwMzU2MjI5MzI1OA.GowVKP.WDndEll0E9aaJr39mU8meCvy_85mfzjUd8Gp20")
+    url = "https://discord.com/api/v10" + path
+    data = None if payload is None else json_bytes(payload)
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"Authorization": f"Bot {token}", "Content-Type": "application/json",
+                 "User-Agent": "StumpTagRebornClaimBot/1.0"},
     )
-    return bool(r.json().get("is_valid"))
+    with urllib.request.urlopen(req, timeout=8) as response:
+        raw = response.read()
+        return json.loads(raw.decode("utf-8")) if raw else {}
 
 
-def playfab_server_login(server_custom_id):
-    """Creates the account on first login, returns the same one every time after."""
-    r = requests.post(
-        f"{PF_BASE}/Server/LoginWithServerCustomId",
-        headers={"X-SecretKey": PLAYFAB_SECRET_KEY},
-        json={"ServerCustomId": server_custom_id, "CreateAccount": True},
-        timeout=10,
+def discord_interaction_callback(interaction_id, interaction_token, payload):
+    url = f"https://discord.com/api/v10/interactions/{interaction_id}/{interaction_token}/callback"
+    req = urllib.request.Request(url, data=json_bytes(payload), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=8) as response:
+        return response.status
+
+
+def edit_original_response(application_id, interaction_token, content):
+    url = f"https://discord.com/api/v10/webhooks/{application_id}/{interaction_token}/messages/@original"
+    req = urllib.request.Request(
+        url, data=json_bytes({"content": content}), method="PATCH",
+        headers={"Authorization": f"Bot {env('DISCORD_BOT_TOKEN')}",
+                 "Content-Type": "application/json"},
     )
-    return r.json()
+    with urllib.request.urlopen(req, timeout=8) as response:
+        return response.status
 
 
-def mark_verified(playfab_id):
-    """Flag accounts made through Meta verification. CloudScript / Photon auth
-    can refuse any account that lacks this flag."""
-    requests.post(
-        f"{PF_BASE}/Server/UpdateUserInternalData",
-        headers={"X-SecretKey": PLAYFAB_SECRET_KEY},
-        json={"PlayFabId": playfab_id, "Data": {"verified": "true"}},
-        timeout=10,
-    )
-
-
-def custom_id_login_enabled():
-    """Probe with a random ID and CreateAccount=False (can never create an account).
-    'Account not found' means the login method itself was accepted => ENABLED.
-    Test once with the setting on and off to confirm what PlayFab returns on your title."""
-    rand = "probe_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
-    r = requests.post(
-        f"{PF_BASE}/Client/LoginWithCustomID",
-        json={"TitleId": PLAYFAB_TITLE_ID, "CustomId": rand, "CreateAccount": False},
-        timeout=10,
-    )
-    j = r.json()
-    return j.get("errorCode") == 1001 or j.get("error") == "AccountNotFound"
-
-
-@app.route("/")
-def hello():
-    return "CloverTag's goody 2 shoes backend opeennn"
-
-
-@app.route("/auth/login", methods=["POST"])
-def auth_login():
+def verify_discord_request(headers, body):
+    signature = headers.get("X-Signature-Ed25519")
+    timestamp = headers.get("X-Signature-Timestamp")
+    if not signature or not timestamp:
+        return False
     try:
-        ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
-        if rate_limited(ip):
-            return jsonify(ok=False, error="rate_limited"), 429
-
-        body = request.get_json(silent=True) or {}
-        user_id = body.get("userId")
-        nonce = body.get("nonce")
-        if not isinstance(user_id, str) or not USER_ID_RE.match(user_id):
-            return jsonify(ok=False, error="bad_user_id"), 400
-        if not isinstance(nonce, str) or not (10 <= len(nonce) <= 2048):
-            return jsonify(ok=False, error="bad_nonce"), 400
-
-        if not verify_meta_nonce(user_id, nonce):
-            return jsonify(ok=False, error="meta_verification_failed"), 401
-
-        # Meta user ID is the permanent identity -> permanent PlayFab account
-        pf = playfab_server_login(f"meta_{user_id}")
-
-        if pf.get("code") != 200:
-            msg = (pf.get("errorMessage") or "").lower()
-            if "banned" in msg:
-                details = pf.get("errorDetails") or {}
-                reason, expires = "", "Indefinite"
-                if details:
-                    reason, vals = next(iter(details.items()))
-                    expires = vals[0] if vals else "Indefinite"
-                return jsonify(ok=False, banned=True, banReason=reason, banExpires=expires), 403
-            app.logger.error("PlayFab error: %s", pf)
-            return jsonify(ok=False, error="playfab_error"), 502
-
-        d = pf["data"]
-        mark_verified(d["PlayFabId"])
-        return jsonify(
-            ok=True,
-            newlyCreated=bool(d.get("NewlyCreated")),
-            playFabId=d["PlayFabId"],
-            sessionTicket=d["SessionTicket"],
-            entityToken=d["EntityToken"]["EntityToken"],
-            entityId=d["EntityToken"]["Entity"]["Id"],
-            entityType=d["EntityToken"]["Entity"]["Type"],
-            titleId=PLAYFAB_TITLE_ID,
-            photonRealtimeId=PHOTON_REALTIME_ID,
-            photonVoiceId=PHOTON_VOICE_ID,
+        VerifyKey(bytes.fromhex(env("5c70106fc61ad98cfdf48cea109a90b41054c80f27825fe74ce5586e3324b987"))).verify(
+            timestamp.encode("utf-8") + body, bytes.fromhex(signature)
         )
-    except Exception as e:
-        app.logger.exception(e)
-        return jsonify(ok=False, error="server_error"), 500
+        return True
+    except (ValueError, BadSignatureError, RuntimeError):
+        return False
 
 
-@app.route("/admin/check-custom-id")
-def check_custom_id():
-    """Ping this from a cron service (e.g. cron-job.org) every hour with
-    ?key=<CRON_SECRET>. Logs a warning if client custom-ID login is still on."""
-    if not CRON_SECRET or request.args.get("key") != CRON_SECRET:
-        return jsonify(error="forbidden"), 403
+def private_message_response(content):
+    return {"type": 4, "data": {"content": content, "flags": 64}}
+
+
+def get_text_input_value(components, wanted_id):
+    for component in components or []:
+        if component.get("type") == 1:
+            found = get_text_input_value(component.get("components", []), wanted_id)
+            if found is not None:
+                return found
+        if component.get("custom_id") == wanted_id:
+            return component.get("value")
+    return None
+
+
+def grant_playfab_item(playfab_id):
+    title_id = env("13CBFD")
+    secret_key = env("ZM5E6SY6ZM17WGX4JCS3HC5K865NKEO13HGJZ1BKN1WC374DQJ")
+    item_id = env("LMADW.")
+    url = f"https://{title_id}.playfabapi.com/Server/GrantItemsToUsers"
+    payload = {"ItemGrants": [{
+        "PlayFabId": playfab_id,
+        "ItemId": item_id,
+        "Annotation": "Stump Tag Reborn Discord claim",
+    }]}
+    req = urllib.request.Request(
+        url, data=json_bytes(payload), method="POST",
+        headers={"X-SecretKey": secret_key, "Content-Type": "application/json"},
+    )
     try:
-        enabled = custom_id_login_enabled()
-    except Exception as e:
-        app.logger.exception(e)
-        return jsonify(error="probe_failed"), 500
-    if enabled:
-        app.logger.error("WARNING: Client LoginWithCustomID is ENABLED. Disable it in PlayFab Game Manager.")
-        # TODO: send to a Discord/Slack webhook here
-    return jsonify(customIdLoginEnabled=enabled)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"PlayFab rejected reward request (HTTP {exc.code}): {detail[:500]}")
+    results = result.get("data", {}).get("ItemGrantResults", [])
+    if results and results[0].get("Result") not in (None, "Granted"):
+        raise RuntimeError(f"PlayFab did not grant item: {results[0].get('Result')}")
+    return result
 
 
-if __name__ == "__main__":
-    app.run(port=int(os.environ.get("PORT", 3000)))
+def send_claim_dm(discord_user_id):
+    dm = discord_api("POST", "/users/@me/channels", {"recipient_id": str(discord_user_id)})
+    discord_api("POST", f"/channels/{dm['id']}/messages", {
+        "content": "Thanks for playing Stump Tag Reborn! Please restart your game"
+    })
+
+
+def process_modal(interaction, player_id):
+    custom_id = interaction.get("data", {}).get("custom_id", "")
+    try:
+        expected_channel = env("1575697457264857228")
+        channel_id = str(interaction.get("channel_id") or "")
+        original_channel_id = custom_id.split(":", 1)[1] if ":" in custom_id else ""
+        if channel_id != expected_channel or original_channel_id != expected_channel:
+            edit_original_response(interaction["application_id"], interaction["token"],
+                                   "This claim can only be completed in the designated claim channel.")
+            return
+        if not player_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", player_id):
+            edit_original_response(interaction["application_id"], interaction["token"],
+                                   "That Player ID doesn't look valid. Run `/claimdiscord` and try again.")
+            return
+
+        grant_playfab_item(player_id)
+        try:
+            send_claim_dm(interaction["member"]["user"]["id"])
+            edit_original_response(interaction["application_id"], interaction["token"],
+                                   "Reward granted! I've sent you a DM. Please restart your game.")
+        except Exception:
+            edit_original_response(interaction["application_id"], interaction["token"],
+                                   "Your reward was granted, but I couldn't DM you. Enable DMs from server members.")
+    except Exception:
+        try:
+            edit_original_response(interaction["application_id"], interaction["token"],
+                                   "I couldn't grant the reward. Check the bot's Vercel logs or ask a moderator.")
+        except Exception:
+            pass
+
+
+class handler(BaseHTTPRequestHandler):
+    def _send(self, status, payload=None):
+        body = b"" if payload is None else json_bytes(payload)
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def do_GET(self):
+        self._send(200, {"ok": True, "service": "Stump Tag Reborn claim bot"})
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        if not verify_discord_request(self.headers, body):
+            self._send(401, {"error": "Invalid Discord request signature"})
+            return
+        try:
+            interaction = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send(400, {"error": "Invalid JSON"})
+            return
+
+        if interaction.get("type") == 1:
+            self._send(200, {"type": 1})
+            return
+
+        data = interaction.get("data", {})
+        interaction_type = interaction.get("type")
+
+        if interaction_type == 2 and data.get("name") == "claimdiscord":
+            try:
+                allowed_channel = env("DISCORD_CHANNEL_ID")
+            except RuntimeError:
+                self._send(500, {"error": "Server configuration incomplete"})
+                return
+            if str(interaction.get("channel_id")) != allowed_channel:
+                self._send(200, private_message_response(
+                    "You can only use `/claimdiscord` in the designated claim channel."
+                ))
+                return
+            self._send(200, {
+                "type": 9,
+                "data": {
+                    "custom_id": f"claimdiscord:{allowed_channel}",
+                    "title": "Claim your Discord reward",
+                    "components": [{
+                        "type": 1,
+                        "components": [{
+                            "type": 4,
+                            "custom_id": "player_id",
+                            "label": "Stump Tag Reborn Player ID",
+                            "style": 1,
+                            "min_length": 1,
+                            "max_length": 64,
+                            "placeholder": "Enter your Player ID",
+                            "required": True,
+                        }],
+                    }],
+                },
+            })
+            return
+
+        if interaction_type == 5 and str(data.get("custom_id", "")).startswith("claimdiscord:"):
+            try:
+                discord_interaction_callback(interaction["id"], interaction["token"],
+                                             {"type": 5, "data": {"flags": 64}})
+            except Exception:
+                self._send(503, {"error": "Could not acknowledge Discord interaction"})
+                return
+            player_id = get_text_input_value(data.get("components", []), "player_id")
+            try:
+                process_modal(interaction, (player_id or "").strip())
+            finally:
+                self._send(200)
+            return
+
+        self._send(200, private_message_response("I don't recognize that command."))
+
+    def log_message(self, format, *args):
+        return
