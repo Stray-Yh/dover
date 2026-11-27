@@ -284,7 +284,7 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
 
         # Protected command registration endpoint
-        if self.path.split("?", 1)[0] == "/api/index" and "register=1" in self.path:
+        if "register=1" in self.path:
 
             try:
                 supplied = self.headers.get("Authorization", "")
