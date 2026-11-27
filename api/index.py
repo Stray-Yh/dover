@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import traceback
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler
@@ -10,8 +11,17 @@ from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 
 
-def env(name):
-    value = os.environ.get(name)
+# YOUR ORIGINAL BOT SETTINGS
+APPLICATION_ID = "1575698303562293258"
+GUILD_ID = "1569834289997021318"
+CLAIM_CHANNEL_ID = "1575697457264857228"
+
+PLAYFAB_TITLE_ID = "13CBFD"
+REWARD_ITEM_ID = "LMADW."
+
+
+def env(name, default=None):
+    value = os.environ.get(name, default)
     if not value:
         raise RuntimeError(f"Missing environment variable: {name}")
     return value
@@ -22,7 +32,8 @@ def json_bytes(value):
 
 
 def discord_api(method, path, payload=None):
-    token = env("MTU3NTY5ODMwMzU2MjI5MzI1OA.GWxFE4.crwmfIiYDW89uIJBj6G7fn40U8O-QBQeLUAAtg")
+    token = env("DISCORD_BOT_TOKEN")
+
     url = "https://discord.com/api/v10" + path
     data = None if payload is None else json_bytes(payload)
 
@@ -37,15 +48,20 @@ def discord_api(method, path, payload=None):
         },
     )
 
-    with urllib.request.urlopen(req, timeout=8) as response:
-        raw = response.read()
-        return json.loads(raw.decode("utf-8")) if raw else {}
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            raw = response.read()
+            return json.loads(raw.decode("utf-8")) if raw else {}
+
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Discord API HTTP {exc.code}: {detail[:1000]}"
+        )
 
 
+# REGISTER /claimdiscord WITH DISCORD
 def register_discord_command():
-    app_id = env("1575698303562293258")
-    guild_id = env("1569834289997021318")
-
     command = {
         "name": "claimdiscord",
         "description": "Claim your Stump Tag Reborn reward",
@@ -54,15 +70,36 @@ def register_discord_command():
 
     return discord_api(
         "POST",
-        f"/applications/{app_id}/guilds/{guild_id}/commands",
+        f"/applications/{APPLICATION_ID}/guilds/{GUILD_ID}/commands",
         command,
     )
 
 
-def discord_interaction_callback(interaction_id, interaction_token, payload):
+def verify_discord_request(headers, body):
+    signature = headers.get("X-Signature-Ed25519")
+    timestamp = headers.get("X-Signature-Timestamp")
+
+    if not signature or not timestamp:
+        return False
+
+    try:
+        public_key = env("DISCORD_PUBLIC_KEY")
+
+        VerifyKey(bytes.fromhex(public_key)).verify(
+            timestamp.encode("utf-8") + body,
+            bytes.fromhex(signature),
+        )
+
+        return True
+
+    except (ValueError, BadSignatureError, RuntimeError):
+        return False
+
+
+def discord_interaction_callback(interaction_id, token, payload):
     url = (
         f"https://discord.com/api/v10/interactions/"
-        f"{interaction_id}/{interaction_token}/callback"
+        f"{interaction_id}/{token}/callback"
     )
 
     req = urllib.request.Request(
@@ -76,10 +113,10 @@ def discord_interaction_callback(interaction_id, interaction_token, payload):
         return response.status
 
 
-def edit_original_response(application_id, interaction_token, content):
+def edit_original_response(application_id, token, content):
     url = (
         f"https://discord.com/api/v10/webhooks/"
-        f"{application_id}/{interaction_token}/messages/@original"
+        f"{application_id}/{token}/messages/@original"
     )
 
     req = urllib.request.Request(
@@ -91,23 +128,6 @@ def edit_original_response(application_id, interaction_token, content):
 
     with urllib.request.urlopen(req, timeout=8) as response:
         return response.status
-
-
-def verify_discord_request(headers, body):
-    signature = headers.get("X-Signature-Ed25519")
-    timestamp = headers.get("X-Signature-Timestamp")
-
-    if not signature or not timestamp:
-        return False
-
-    try:
-        VerifyKey(bytes.fromhex(env("5c70106fc61ad98cfdf48cea109a90b41054c80f27825fe74ce5586e3324b987"))).verify(
-            timestamp.encode("utf-8") + body,
-            bytes.fromhex(signature),
-        )
-        return True
-    except (Value, BadSignatureError, RuntimeError):
-        return False
 
 
 def private_message_response(content):
@@ -122,11 +142,13 @@ def private_message_response(content):
 
 def get_text_input_value(components, wanted_id):
     for component in components or []:
+
         if component.get("type") == 1:
             found = get_text_input_value(
                 component.get("components", []),
                 wanted_id,
             )
+
             if found is not None:
                 return found
 
@@ -136,12 +158,16 @@ def get_text_input_value(components, wanted_id):
     return None
 
 
+# PLAYFAB REWARD
 def grant_playfab_item(playfab_id):
-    title_id = env("13CBFD")
-    secret_key = env("ZM5E6SY6ZM17WGX4JCS3HC5K865NKEO13HGJZ1BKN1WC374DQJ")
-    item_id = env("LMADW.")
+    title_id = env("PLAYFAB_TITLE_ID", PLAYFAB_TITLE_ID)
+    secret_key = env("PLAYFAB_SECRET_KEY")
+    item_id = env("REWARD_ITEM_ID", REWARD_ITEM_ID)
 
-    url = f"https://{title_id}.playfabapi.com/Server/GrantItemsToUsers"
+    url = (
+        f"https://{title_id}.playfabapi.com/"
+        "Server/GrantItemsToUsers"
+    )
 
     payload = {
         "ItemGrants": [{
@@ -168,19 +194,20 @@ def grant_playfab_item(playfab_id):
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(
-            f"PlayFab rejected reward request (HTTP {exc.code}): {detail[:500]}"
+            f"PlayFab HTTP {exc.code}: {detail[:500]}"
         )
 
     results = result.get("data", {}).get("ItemGrantResults", [])
 
     if results and results[0].get("Result") not in (None, "Granted"):
         raise RuntimeError(
-            f"PlayFab did not grant item: {results[0].get('Result')}"
+            f"PlayFab grant failed: {results[0].get('Result')}"
         )
 
     return result
 
 
+# SEND THE CLAIM CONFIRMATION DM
 def send_claim_dm(discord_user_id):
     dm = discord_api(
         "POST",
@@ -200,21 +227,22 @@ def send_claim_dm(discord_user_id):
     )
 
 
+# PROCESS PLAYER ID MODAL
 def process_modal(interaction, player_id):
     custom_id = interaction.get("data", {}).get("custom_id", "")
 
     try:
-        expected_channel = env("DISCORD_CHANNEL_ID")
+        expected_channel = CLAIM_CHANNEL_ID
         channel_id = str(interaction.get("channel_id") or "")
 
-        original_channel_id = (
+        original_channel = (
             custom_id.split(":", 1)[1]
             if ":" in custom_id else ""
         )
 
         if (
             channel_id != expected_channel
-            or original_channel_id != expected_channel
+            or original_channel != expected_channel
         ):
             edit_original_response(
                 interaction["application_id"],
@@ -233,30 +261,38 @@ def process_modal(interaction, player_id):
             )
             return
 
+        # Grant the PlayFab reward
         grant_playfab_item(player_id)
 
+        # Send the confirmation DM
         try:
             send_claim_dm(interaction["member"]["user"]["id"])
 
-            edit_original_response(
-                interaction["application_id"],
-                interaction["token"],
-                "Reward granted! I've sent you a DM. Please restart your game.",
+            message = (
+                "Reward granted! I've sent you a DM. "
+                "Please restart your game."
             )
 
         except Exception:
-            edit_original_response(
-                interaction["application_id"],
-                interaction["token"],
-                "Your reward was granted, but I couldn't DM you. Enable DMs from server members.",
+            message = (
+                "Your reward was granted, but I couldn't DM you. "
+                "Enable DMs from server members."
             )
 
+        edit_original_response(
+            interaction["application_id"],
+            interaction["token"],
+            message,
+        )
+
     except Exception:
+        print(traceback.format_exc())
+
         try:
             edit_original_response(
                 interaction["application_id"],
                 interaction["token"],
-                "I couldn't grant the reward. Check the bot's Vercel logs or ask a moderator.",
+                "I couldn't grant the reward. Please contact a moderator.",
             )
         except Exception:
             pass
@@ -283,15 +319,17 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
 
-        # Protected command registration endpoint
+        # REGISTER COMMAND THROUGH VERCEL
         if "register=1" in self.path:
 
             try:
                 supplied = self.headers.get("Authorization", "")
-                expected = "Bearer " + env("fuckofftrynapullyouaintgoodgngngggg")
+                expected = "Bearer " + env("SETUP_SECRET")
 
                 if supplied != expected:
-                    self._send(401, {"error": "Unauthorized"})
+                    self._send(401, {
+                        "error": "Unauthorized"
+                    })
                     return
 
                 result = register_discord_command()
@@ -301,16 +339,16 @@ class handler(BaseHTTPRequestHandler):
                     "command": result,
                 })
 
-except Exception as exc:
-    import traceback
-    self._send(500, {
-        "error": str(exc),
-        "details": traceback.format_exc()
-    })
+            except Exception as exc:
+                print(traceback.format_exc())
+
+                self._send(500, {
+                    "error": str(exc),
+                })
 
             return
 
-        # Normal Discord interaction handling
+        # NORMAL DISCORD INTERACTIONS
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
 
@@ -322,11 +360,14 @@ except Exception as exc:
 
         try:
             interaction = json.loads(body.decode("utf-8"))
+
         except (UnicodeDecodeError, json.JSONDecodeError):
-            self._send(400, {"error": "Invalid JSON"})
+            self._send(400, {
+                "error": "Invalid JSON"
+            })
             return
 
-        # Discord endpoint verification
+        # DISCORD ENDPOINT VERIFICATION
         if interaction.get("type") == 1:
             self._send(200, {"type": 1})
             return
@@ -334,21 +375,13 @@ except Exception as exc:
         data = interaction.get("data", {})
         interaction_type = interaction.get("type")
 
-        # Slash command
+        # /claimdiscord COMMAND
         if (
             interaction_type == 2
             and data.get("name") == "claimdiscord"
         ):
 
-            try:
-                allowed_channel = env("DISCORD_CHANNEL_ID")
-            except RuntimeError:
-                self._send(500, {
-                    "error": "Server configuration incomplete"
-                })
-                return
-
-            if str(interaction.get("channel_id")) != allowed_channel:
+            if str(interaction.get("channel_id")) != CLAIM_CHANNEL_ID:
                 self._send(200, private_message_response(
                     "You can only use `/claimdiscord` in the designated claim channel."
                 ))
@@ -357,7 +390,7 @@ except Exception as exc:
             self._send(200, {
                 "type": 9,
                 "data": {
-                    "custom_id": f"claimdiscord:{allowed_channel}",
+                    "custom_id": f"claimdiscord:{CLAIM_CHANNEL_ID}",
                     "title": "Claim your Discord reward",
                     "components": [{
                         "type": 1,
@@ -376,7 +409,7 @@ except Exception as exc:
             })
             return
 
-        # Modal submission
+        # PLAYER ID MODAL SUBMISSION
         if (
             interaction_type == 5
             and str(data.get("custom_id", "")).startswith("claimdiscord:")
@@ -386,8 +419,12 @@ except Exception as exc:
                 discord_interaction_callback(
                     interaction["id"],
                     interaction["token"],
-                    {"type": 5, "data": {"flags": 64}},
+                    {
+                        "type": 5,
+                        "data": {"flags": 64},
+                    },
                 )
+
             except Exception:
                 self._send(503, {
                     "error": "Could not acknowledge Discord interaction"
@@ -399,17 +436,17 @@ except Exception as exc:
                 "player_id",
             )
 
-            try:
-                process_modal(interaction, (player_id or "").strip())
-            finally:
-                self._send(200)
+            process_modal(
+                interaction,
+                (player_id or "").strip(),
+            )
 
+            self._send(200)
             return
 
-        self._send(
-            200,
-            private_message_response("I don't recognize that command."),
-        )
+        self._send(200, private_message_response(
+            "I don't recognize that command."
+        ))
 
     def log_message(self, format, *args):
         return
