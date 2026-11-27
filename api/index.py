@@ -288,7 +288,7 @@ class handler(BaseHTTPRequestHandler):
 
             try:
                 supplied = self.headers.get("Authorization", "")
-                expected = "Bearer " + env("SETUP_SECRET")
+                expected = "Bearer " + env("fuckofftrynapullyouaintgoodgngngggg")
 
                 if supplied != expected:
                     self._send(401, {"error": "Unauthorized"})
