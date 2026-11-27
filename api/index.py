@@ -159,15 +159,13 @@ def get_text_input_value(components, wanted_id):
 
 
 # PLAYFAB REWARD
+
 def grant_playfab_item(playfab_id):
     title_id = env("PLAYFAB_TITLE_ID", PLAYFAB_TITLE_ID)
     secret_key = env("PLAYFAB_SECRET_KEY")
     item_id = env("REWARD_ITEM_ID", REWARD_ITEM_ID)
 
-    url = (
-        f"https://{title_id}.playfabapi.com/"
-        "Server/GrantItemsToUsers"
-    )
+    url = f"https://{title_id}.playfabapi.com/Server/GrantItemsToUsers"
 
     payload = {
         "ItemGrants": [{
@@ -188,7 +186,7 @@ def grant_playfab_item(playfab_id):
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=15) as response:
             result = json.loads(response.read().decode("utf-8"))
 
     except urllib.error.HTTPError as exc:
@@ -199,12 +197,17 @@ def grant_playfab_item(playfab_id):
 
     results = result.get("data", {}).get("ItemGrantResults", [])
 
-    if results and results[0].get("Result") not in (None, "Granted"):
+    if not results:
+        raise RuntimeError("PlayFab returned no item grant results.")
+
+    if results[0].get("Result") is not True:
         raise RuntimeError(
-            f"PlayFab grant failed: {results[0].get('Result')}"
+            f"PlayFab did not grant item {item_id}. "
+            f"Result: {results[0].get('Result')}"
         )
 
     return result
+
 
 
 # SEND THE CLAIM CONFIRMATION DM
